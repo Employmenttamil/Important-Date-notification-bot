@@ -1,7 +1,8 @@
 """
 Scraper module for fetching exam date announcements from TNPSC, SSC, and RRB websites.
-Uses AI (Groq/Gemini) for smart date extraction and Tamil translation.
-Falls back to regex-based extraction if AI is unavailable.
+
+STRICT RULE: Only notifications containing REAL DATES are kept for broadcasting.
+Everything else is silently discarded.
 """
 
 import json
@@ -18,70 +19,47 @@ from ai_processor import process_notification, is_ai_available
 
 logger = logging.getLogger(__name__)
 
-# Date patterns to extract from notification text (regex fallback)
+# Date patterns — used to verify a real date exists
 DATE_PATTERNS = [
     r'\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}',
     r'\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}',
     r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',
+    r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}',
 ]
 
-# Keywords for categorizing date types (regex fallback)
+# Keywords that indicate date-related notifications
+DATE_KEYWORDS = [
+    "exam date", "examination date", "date of exam", "test date",
+    "hall ticket", "admit card", "call letter",
+    "last date", "closing date", "deadline",
+    "application start", "registration start", "opening date",
+    "extension", "extended", "revised last date",
+    "postpone", "postponed", "deferred", "rescheduled", "delayed",
+    "result", "results declared", "score card", "merit list",
+    "schedule", "date sheet", "time table",
+]
+
+# Keywords for categorizing date types
 DATE_TYPE_KEYWORDS = {
-    "exam_date": [
-        "exam date", "examination date", "date of exam", "test date",
-        "written exam", "written test", "cbt date", "online exam",
-    ],
-    "hall_ticket": [
-        "hall ticket", "admit card", "admission certificate",
-        "e-admit card", "call letter",
-    ],
-    "application_start": [
-        "application start", "apply from", "registration start",
-        "commencement of application", "opening date",
-    ],
-    "application_end": [
-        "last date", "application end", "closing date",
-        "last date to apply", "deadline", "last date for submission",
-    ],
-    "date_extension": [
-        "extension", "extended", "date extended",
-        "revised last date", "extended up to",
-    ],
-    "postponed": [
-        "postpone", "postponed", "deferred", "rescheduled",
-        "delayed", "held in abeyance",
-    ],
-    "result_date": [
-        "result", "results declared", "result date",
-        "score card", "merit list", "final result",
-    ],
-    "notification_date": [
-        "notification", "advertisement", "recruitment notification",
-        "vacancy notification",
-    ],
+    "exam_date": ["exam date", "examination date", "test date", "written exam", "cbt date"],
+    "hall_ticket": ["hall ticket", "admit card", "call letter", "e-admit card"],
+    "application_start": ["application start", "apply from", "registration start", "opening date"],
+    "application_end": ["last date", "closing date", "deadline", "last date to apply"],
+    "date_extension": ["extension", "extended", "revised last date", "extended up to"],
+    "postponed": ["postpone", "postponed", "deferred", "rescheduled", "delayed"],
+    "result_date": ["result", "results declared", "score card", "merit list"],
 }
 
-# Tamil labels for date types
-DATE_TYPE_TAMIL = {
-    "exam_date": "📝 தேர்வு நாள்",
-    "hall_ticket": "🎫 ஹால் டிக்கெட் வெளியீடு",
-    "hall_ticket_date": "🎫 ஹால் டிக்கெட் வெளியீடு",
-    "application_start": "📋 விண்ணப்பம் தொடக்க நாள்",
-    "application_start_date": "📋 விண்ணப்பம் தொடக்க நாள்",
-    "application_end": "⏰ விண்ணப்பம் கடைசி நாள்",
-    "application_end_date": "⏰ விண்ணப்பம் கடைசி நாள்",
-    "date_extension": "📅 நாள் நீட்டிப்பு",
-    "postponed": "⚠️ தேர்வு ஒத்திவைப்பு / தாமதம்",
-    "postponed_to": "⚠️ ஒத்திவைக்கப்பட்ட புதிய நாள்",
-    "result_date": "📊 முடிவு வெளியீடு",
-    "notification_date": "📢 அறிவிப்பு நாள்",
-    "extended_date": "📅 நீட்டிக்கப்பட்ட நாள்",
-    "new_date": "🔄 புதிய நாள்",
-}
+# URLs to IGNORE (not official government sites)
+BLOCKED_DOMAINS = [
+    "clasticon.com", "facebook.com", "twitter.com", "youtube.com",
+    "instagram.com", "whatsapp.com", "google.com", "play.google.com",
+    "apple.com", "microsoft.com",
+]
 
 
 class NotificationScraper:
-    """Scrapes exam date notifications from government recruitment websites."""
+    """Scrapes exam date notifications — ONLY keeps those with real dates."""
 
     def __init__(self, seen_file: str = "seen_notifications.json"):
         self.seen_file = seen_file
@@ -97,18 +75,6 @@ class NotificationScraper:
         }
         self.session = requests.Session()
         self.session.headers.update(self.headers)
-
-        # Check AI availability
-        ai_status = is_ai_available()
-        if ai_status["any_available"]:
-            providers = []
-            if ai_status["groq"]:
-                providers.append("Groq")
-            if ai_status["gemini"]:
-                providers.append("Gemini")
-            logger.info(f"AI processing enabled: {', '.join(providers)}")
-        else:
-            logger.warning("No AI API keys configured. Using basic regex extraction.")
 
     def _load_seen_hashes(self) -> set:
         if os.path.exists(self.seen_file):
@@ -147,16 +113,54 @@ class NotificationScraper:
         self._save_seen_hashes()
         return True
 
+    def _is_valid_url(self, url: str) -> bool:
+        """Check if URL is from an official government site, not a random link."""
+        if not url:
+            return True  # No URL is fine, we just won't include a link
+        url_lower = url.lower()
+        for blocked in BLOCKED_DOMAINS:
+            if blocked in url_lower:
+                return False
+        # Only allow government/official URLs
+        valid_domains = [
+            "tnpsc.gov.in", "ssc.gov.in", "ssc.nic.in",
+            "rrbchennai.gov.in", "rrb", ".gov.in", ".nic.in",
+        ]
+        return any(domain in url_lower for domain in valid_domains)
+
+    def _has_date_in_text(self, text: str) -> bool:
+        """Check if text contains any real date pattern."""
+        for pattern in DATE_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+
+    def _has_date_keywords(self, text: str) -> bool:
+        """Check if text contains date-related keywords."""
+        text_lower = text.lower()
+        return any(keyword in text_lower for keyword in DATE_KEYWORDS)
+
+    def _is_date_relevant(self, text: str) -> bool:
+        """
+        STRICT FILTER: Only return True if the notification is about dates.
+        Must have EITHER a real date pattern OR date-related keywords.
+        """
+        if self._has_date_in_text(text):
+            return True
+        if self._has_date_keywords(text):
+            return True
+        return False
+
     def _extract_dates_regex(self, text: str) -> List[str]:
-        """Regex fallback: extract date strings from text."""
+        """Extract date strings from text using regex."""
         dates = []
         for pattern in DATE_PATTERNS:
             found = re.findall(pattern, text, re.IGNORECASE)
             dates.extend(found)
         return dates
 
-    def _detect_date_type_regex(self, text: str) -> str:
-        """Regex fallback: detect date type from keywords."""
+    def _detect_date_type(self, text: str) -> str:
+        """Detect date type from keywords."""
         text_lower = text.lower()
         for date_type, keywords in DATE_TYPE_KEYWORDS.items():
             for keyword in keywords:
@@ -164,13 +168,19 @@ class NotificationScraper:
                     return date_type
         return "notification_date"
 
-    def _extract_date_details_regex(self, text: str) -> Dict[str, Any]:
+    def _extract_date_details_regex(self, text: str) -> Optional[Dict[str, Any]]:
         """
-        Regex fallback: extract date details when AI is unavailable.
+        Regex-based date extraction. Returns None if no real date found.
         """
+        dates_found = self._extract_dates_regex(text)
+        if not dates_found:
+            # No real date in text — SKIP this notification
+            return None
+
+        date_type = self._detect_date_type(text)
         details = {
-            "date_type": self._detect_date_type_regex(text),
-            "dates_found": self._extract_dates_regex(text),
+            "date_type": date_type,
+            "dates_found": dates_found,
             "is_extension": False,
             "is_postponed": False,
             "specific_dates": {},
@@ -178,16 +188,14 @@ class NotificationScraper:
         }
 
         text_lower = text.lower()
-
         if any(kw in text_lower for kw in ["extend", "extension", "revised last date"]):
             details["is_extension"] = True
             details["date_type"] = "date_extension"
-
         if any(kw in text_lower for kw in ["postpone", "defer", "reschedule", "delay"]):
             details["is_postponed"] = True
             details["date_type"] = "postponed"
 
-        # Try to associate dates with their context
+        # Associate dates with context
         lines = text.split("\n")
         for line in lines:
             line_lower = line.lower().strip()
@@ -196,78 +204,66 @@ class NotificationScraper:
                 if any(kw in line_lower for kw in ["exam date", "examination date", "test date"]):
                     details["specific_dates"]["exam_date"] = dates_in_line[0]
                 elif any(kw in line_lower for kw in ["hall ticket", "admit card"]):
-                    details["specific_dates"]["hall_ticket"] = dates_in_line[0]
+                    details["specific_dates"]["hall_ticket_date"] = dates_in_line[0]
                 elif any(kw in line_lower for kw in ["last date", "closing date", "deadline"]):
-                    details["specific_dates"]["application_end"] = dates_in_line[0]
+                    details["specific_dates"]["application_end_date"] = dates_in_line[0]
                 elif any(kw in line_lower for kw in ["start", "begin", "commencement", "opening"]):
-                    details["specific_dates"]["application_start"] = dates_in_line[0]
+                    details["specific_dates"]["application_start_date"] = dates_in_line[0]
                 elif any(kw in line_lower for kw in ["result", "merit"]):
                     details["specific_dates"]["result_date"] = dates_in_line[0]
                 elif any(kw in line_lower for kw in ["extend", "revised"]):
-                    details["specific_dates"]["extended_date"] = dates_in_line[0]
+                    details["specific_dates"]["date_extension"] = dates_in_line[0]
                 elif any(kw in line_lower for kw in ["postpone", "reschedule", "new date"]):
-                    details["specific_dates"]["new_date"] = dates_in_line[0]
+                    details["specific_dates"]["postponed_to"] = dates_in_line[0]
 
-        if not details["specific_dates"] and details["dates_found"]:
-            details["specific_dates"][details["date_type"]] = details["dates_found"][0]
-
-        return details
-
-    def _extract_date_details_ai(self, text: str, source: str) -> Optional[Dict[str, Any]]:
-        """
-        AI-powered date extraction using Groq (primary) or Gemini (fallback).
-        Returns structured date details or None if AI fails.
-        """
-        ai_result = process_notification(text, source)
-        if not ai_result:
-            return None
-
-        # Convert AI result to our standard format
-        details = {
-            "date_type": ai_result.get("date_type", "notification_date"),
-            "is_extension": ai_result.get("is_extension", False),
-            "is_postponed": ai_result.get("is_postponed", False),
-            "specific_dates": {},
-            "ai_processed": True,
-            "ai_provider": ai_result.get("_ai_provider", "unknown"),
-            "title_tamil": ai_result.get("title_tamil", ""),
-            "summary_tamil": ai_result.get("summary_tamil", ""),
-            "post_name": ai_result.get("post_name", ""),
-            "important_note_tamil": ai_result.get("important_note_tamil", ""),
-        }
-
-        # Extract dates from AI response
-        ai_dates = ai_result.get("dates", {})
-        for key, value in ai_dates.items():
-            if value and value != "null" and str(value).lower() != "none":
-                details["specific_dates"][key] = value
-
-        # Collect all found dates
-        details["dates_found"] = list(details["specific_dates"].values())
+        # If no specific categorization, put first date under detected type
+        if not details["specific_dates"] and dates_found:
+            details["specific_dates"][date_type] = dates_found[0]
 
         return details
 
-    def _extract_date_details(self, text: str, source: str) -> Dict[str, Any]:
+    def _extract_date_details(self, text: str, source: str) -> Optional[Dict[str, Any]]:
         """
         Extract date details — tries AI first, falls back to regex.
-
-        Args:
-            text: Notification text
-            source: Source website name
-
-        Returns:
-            Dictionary with extracted date details
+        Returns None if NO real date is found (notification will be SKIPPED).
         """
         # Try AI processing first
-        ai_details = self._extract_date_details_ai(text, source)
-        if ai_details:
-            logger.info(f"AI extracted dates for {source}: {ai_details.get('specific_dates', {})}")
-            return ai_details
+        ai_result = process_notification(text, source)
+        if ai_result:
+            # AI confirmed has_important_date = True
+            details = {
+                "date_type": ai_result.get("date_type", "notification_date"),
+                "is_extension": ai_result.get("is_extension", False),
+                "is_postponed": ai_result.get("is_postponed", False),
+                "specific_dates": {},
+                "ai_processed": True,
+                "title_tamil": ai_result.get("title_tamil", ""),
+                "post_name": ai_result.get("post_name", ""),
+            }
 
-        # Fallback to regex
+            # Extract dates from AI response
+            ai_dates = ai_result.get("dates", {})
+            for key, value in ai_dates.items():
+                if value and str(value).lower() not in ("null", "none", ""):
+                    details["specific_dates"][key] = value
+
+            # Double-check: AI said important but no actual dates extracted?
+            if not details["specific_dates"]:
+                logger.info(f"AI said important but no dates extracted for {source}. SKIPPING.")
+                return None
+
+            details["dates_found"] = list(details["specific_dates"].values())
+            return details
+
+        # AI returned None (no important date) or failed
+        # Fallback to regex — but ONLY if text actually has dates
         regex_details = self._extract_date_details_regex(text)
-        logger.info(f"Regex extracted dates for {source}: {regex_details.get('specific_dates', {})}")
-        return regex_details
+        if regex_details:
+            logger.info(f"Regex found dates for {source}: {regex_details.get('specific_dates', {})}")
+            return regex_details
+
+        # No dates found by either method — DO NOT broadcast
+        return None
 
     def _fetch_page(self, url: str, timeout: int = 15) -> Optional[BeautifulSoup]:
         try:
@@ -279,7 +275,7 @@ class NotificationScraper:
             return None
 
     def scrape_tnpsc(self) -> List[Dict[str, Any]]:
-        """Scrape TNPSC notifications."""
+        """Scrape TNPSC notifications — only keep those with dates."""
         notifications = []
         urls = [
             ("https://www.tnpsc.gov.in/english/whatsnew.html", "What's New"),
@@ -307,26 +303,31 @@ class NotificationScraper:
                                 if not href.startswith("http"):
                                     href = f"https://www.tnpsc.gov.in/{href}"
                                 link_url = href
-                            if text.strip() and len(text.strip()) > 10:
+                            if text.strip() and len(text.strip()) > 15:
                                 items.append((text.strip(), link_url))
-
-                for link in soup.find_all("a"):
-                    text = link.get_text(strip=True)
-                    href = link.get("href", "")
-                    if text and len(text) > 10:
-                        if not href.startswith("http"):
-                            href = f"https://www.tnpsc.gov.in/{href}"
-                        items.append((text, href))
 
                 seen_texts = set()
                 for text, link_url in items[:30]:
-                    if text in seen_texts or len(text) < 10:
+                    if text in seen_texts or len(text) < 15:
                         continue
                     seen_texts.add(text)
 
+                    # FILTER 1: Must be date-relevant
+                    if not self._is_date_relevant(text):
+                        continue
+
+                    # FILTER 2: URL must be valid (no random external links)
+                    if not self._is_valid_url(link_url):
+                        link_url = "https://www.tnpsc.gov.in/"
+
                     content = f"TNPSC: {text}"
                     if self._is_new_notification(content):
+                        # FILTER 3: Must have extractable dates
                         date_details = self._extract_date_details(text, "TNPSC")
+                        if date_details is None:
+                            logger.info(f"TNPSC: No real date found, skipping: {text[:80]}")
+                            continue
+
                         notifications.append({
                             "source": "TNPSC",
                             "title": text[:500],
@@ -335,7 +336,7 @@ class NotificationScraper:
                             "date_details": date_details,
                         })
 
-                logger.info(f"TNPSC {page_name}: processed {len(seen_texts)} items")
+                logger.info(f"TNPSC {page_name}: {len(notifications)} date notifications found")
 
             except Exception as e:
                 logger.error(f"Error scraping TNPSC ({page_name}): {e}")
@@ -343,7 +344,7 @@ class NotificationScraper:
         return notifications
 
     def scrape_ssc(self) -> List[Dict[str, Any]]:
-        """Scrape SSC notifications."""
+        """Scrape SSC notifications — only keep those with dates."""
         notifications = []
         urls = [
             "https://ssc.gov.in/",
@@ -368,7 +369,7 @@ class NotificationScraper:
                         for link in elem.find_all("a"):
                             text = link.get_text(strip=True)
                             href = link.get("href", "")
-                            if text and len(text) > 10:
+                            if text and len(text) > 15:
                                 if not href.startswith("http"):
                                     href = f"https://ssc.gov.in/{href}"
                                 items.append((text, href))
@@ -383,13 +384,26 @@ class NotificationScraper:
 
                 seen_texts = set()
                 for text, link_url in items[:20]:
-                    if text in seen_texts or len(text) < 10:
+                    if text in seen_texts or len(text) < 15:
                         continue
                     seen_texts.add(text)
 
+                    # FILTER 1: Must be date-relevant
+                    if not self._is_date_relevant(text):
+                        continue
+
+                    # FILTER 2: URL must be valid
+                    if not self._is_valid_url(link_url):
+                        link_url = "https://ssc.gov.in/"
+
                     content = f"SSC: {text}"
                     if self._is_new_notification(content):
+                        # FILTER 3: Must have extractable dates
                         date_details = self._extract_date_details(text, "SSC")
+                        if date_details is None:
+                            logger.info(f"SSC: No real date found, skipping: {text[:80]}")
+                            continue
+
                         notifications.append({
                             "source": "SSC",
                             "title": text[:500],
@@ -398,7 +412,7 @@ class NotificationScraper:
                             "date_details": date_details,
                         })
 
-                logger.info(f"SSC ({url}): processed {len(seen_texts)} items")
+                logger.info(f"SSC ({url}): {len(notifications)} date notifications found")
                 if items:
                     break
 
@@ -408,7 +422,7 @@ class NotificationScraper:
         return notifications
 
     def scrape_rrb(self) -> List[Dict[str, Any]]:
-        """Scrape RRB notifications."""
+        """Scrape RRB notifications — only keep those with dates."""
         notifications = []
         rrb_sites = [
             ("https://www.rrbchennai.gov.in/", "RRB Chennai"),
@@ -436,26 +450,31 @@ class NotificationScraper:
                                 if not href.startswith("http"):
                                     href = f"https://www.rrbchennai.gov.in/{href}"
                                 link_url = href
-                            if text.strip() and len(text.strip()) > 10:
+                            if text.strip() and len(text.strip()) > 15:
                                 items.append((text.strip(), link_url))
-
-                for link in soup.find_all("a"):
-                    text = link.get_text(strip=True)
-                    href = link.get("href", "")
-                    if text and len(text) > 10:
-                        if not href.startswith("http"):
-                            href = f"https://www.rrbchennai.gov.in/{href}"
-                        items.append((text, href))
 
                 seen_texts = set()
                 for text, link_url in items[:20]:
-                    if text in seen_texts or len(text) < 10:
+                    if text in seen_texts or len(text) < 15:
                         continue
                     seen_texts.add(text)
 
+                    # FILTER 1: Must be date-relevant
+                    if not self._is_date_relevant(text):
+                        continue
+
+                    # FILTER 2: URL must be valid
+                    if not self._is_valid_url(link_url):
+                        link_url = "https://www.rrbchennai.gov.in/"
+
                     content = f"RRB: {text}"
                     if self._is_new_notification(content):
+                        # FILTER 3: Must have extractable dates
                         date_details = self._extract_date_details(text, "RRB Chennai")
+                        if date_details is None:
+                            logger.info(f"RRB: No real date found, skipping: {text[:80]}")
+                            continue
+
                         notifications.append({
                             "source": "RRB Chennai",
                             "title": text[:500],
@@ -464,7 +483,7 @@ class NotificationScraper:
                             "date_details": date_details,
                         })
 
-                logger.info(f"{site_name}: processed {len(seen_texts)} items")
+                logger.info(f"{site_name}: {len(notifications)} date notifications found")
 
             except Exception as e:
                 logger.error(f"Error scraping {site_name}: {e}")
@@ -472,29 +491,31 @@ class NotificationScraper:
         return notifications
 
     def scrape_all(self) -> List[Dict[str, Any]]:
-        """Scrape all sources and return new notifications."""
+        """Scrape all sources — returns ONLY notifications with real dates."""
         all_notifications = []
         logger.info("=" * 50)
-        logger.info("Starting scrape of all sources...")
+        logger.info("Starting scrape — ONLY broadcasting notifications with REAL DATES")
 
         ai_status = is_ai_available()
         if ai_status["any_available"]:
-            logger.info("AI processing: ENABLED")
+            logger.info("AI processing: ENABLED (strict date filtering)")
         else:
-            logger.info("AI processing: DISABLED (no API keys)")
+            logger.info("AI processing: DISABLED (using regex date filtering)")
 
         tnpsc_notifs = self.scrape_tnpsc()
         all_notifications.extend(tnpsc_notifs)
-        logger.info(f"TNPSC: {len(tnpsc_notifs)} new notifications")
+        logger.info(f"TNPSC: {len(tnpsc_notifs)} notifications WITH dates")
 
         ssc_notifs = self.scrape_ssc()
         all_notifications.extend(ssc_notifs)
-        logger.info(f"SSC: {len(ssc_notifs)} new notifications")
+        logger.info(f"SSC: {len(ssc_notifs)} notifications WITH dates")
 
         rrb_notifs = self.scrape_rrb()
         all_notifications.extend(rrb_notifs)
-        logger.info(f"RRB: {len(rrb_notifs)} new notifications")
+        logger.info(f"RRB: {len(rrb_notifs)} notifications WITH dates")
 
-        logger.info(f"Total new notifications: {len(all_notifications)}")
+        logger.info(f"Total notifications to broadcast: {len(all_notifications)}")
+        if len(all_notifications) == 0:
+            logger.info("No new date announcements found. Nothing to broadcast.")
         logger.info("=" * 50)
         return all_notifications
