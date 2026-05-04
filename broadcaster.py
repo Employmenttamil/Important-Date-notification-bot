@@ -1,11 +1,10 @@
 """
 Broadcaster module for sending exam date announcements to Telegram channels.
-Handles multi-channel broadcasting with rate limiting and message formatting in Tamil.
+Clean Tamil announcements with 0.5s delay between messages.
 
-Rate Limiting Strategy:
-- 0.5 second delay between each message to avoid Telegram API rate limits
-- Automatic retry on RetryAfter errors with the specified wait time
-- Graceful handling of blocked/unavailable channels
+NO AI credit lines.
+NO random external links.
+ONLY official government links + employmenttamil.in/shop
 """
 
 import logging
@@ -16,14 +15,10 @@ from telegram.error import TelegramError, RetryAfter
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────
-# RATE LIMITING: 0.5 second delay between each message
-# Telegram allows ~30 messages/second to different chats,
-# but being conservative to avoid 429 errors with 96 channels
-# ──────────────────────────────────────────────
+# Rate limiting: 0.5 second delay between each message
 BROADCAST_DELAY = 0.5
 
-# Tamil labels for date types used in announcements
+# Tamil labels for date types
 DATE_TYPE_TAMIL = {
     "exam_date": "📝 தேர்வு நாள்",
     "hall_ticket": "🎫 ஹால் டிக்கெட் வெளியீடு",
@@ -33,7 +28,7 @@ DATE_TYPE_TAMIL = {
     "application_end": "⏰ விண்ணப்பம் கடைசி நாள்",
     "application_end_date": "⏰ விண்ணப்பம் கடைசி நாள்",
     "date_extension": "📅 நாள் நீட்டிப்பு",
-    "postponed": "⚠️ தேர்வு ஒத்திவைப்பு / தாமதம்",
+    "postponed": "⚠️ தேர்வு ஒத்திவைப்பு",
     "postponed_to": "⚠️ ஒத்திவைக்கப்பட்ட புதிய நாள்",
     "result_date": "📊 முடிவு வெளியீடு",
     "notification_date": "📢 அறிவிப்பு நாள்",
@@ -56,73 +51,12 @@ class TelegramBroadcaster:
         self.bot_token = bot_token
         self.channel_ids = channel_ids
         logger.info(f"Broadcaster initialized with {len(channel_ids)} channels")
-        logger.info(f"Rate limit delay: {BROADCAST_DELAY}s between messages")
-
-    def _format_date_details_tamil(self, date_details: Dict[str, Any]) -> str:
-        """Format extracted date details into Tamil text."""
-        if not date_details:
-            return ""
-
-        lines = []
-        ai_processed = date_details.get("ai_processed", False)
-
-        # ── AI-processed content (richer, with Tamil translation) ──
-        if ai_processed:
-            # Post name from AI
-            post_name = date_details.get("post_name", "")
-            if post_name:
-                lines.append(f"\n🏷️ பதவி: {post_name}")
-
-            # AI Tamil summary
-            summary = date_details.get("summary_tamil", "")
-            if summary:
-                lines.append(f"\n📄 {summary}")
-
-            # Date type header
-            date_type = date_details.get("date_type", "notification_date")
-            type_label = DATE_TYPE_TAMIL.get(date_type, "📢 அறிவிப்பு")
-            lines.append(f"\n{type_label}")
-
-        else:
-            # Basic date type header (regex fallback)
-            date_type = date_details.get("date_type", "notification_date")
-            type_label = DATE_TYPE_TAMIL.get(date_type, "📢 அறிவிப்பு")
-            lines.append(f"\n{type_label}")
-
-        # ── Specific dates section ──
-        specific_dates = date_details.get("specific_dates", {})
-        if specific_dates:
-            lines.append("")
-            for key, date_val in specific_dates.items():
-                if date_val and str(date_val).lower() not in ("null", "none", ""):
-                    label = DATE_TYPE_TAMIL.get(key, key)
-                    lines.append(f"  ▪️ {label}: {date_val}")
-
-        # ── Extension / Postponement alerts ──
-        if date_details.get("is_extension"):
-            lines.append("\n⚡ நாள் நீட்டிக்கப்பட்டுள்ளது!")
-        if date_details.get("is_postponed"):
-            lines.append("\n⚡ தேர்வு ஒத்திவைக்கப்பட்டுள்ளது / தாமதமாகியுள்ளது!")
-
-        # ── Important note from AI ──
-        if ai_processed:
-            note = date_details.get("important_note_tamil", "")
-            if note:
-                lines.append(f"\n💡 குறிப்பு: {note}")
-
-        # ── Fallback: list dates if no specific categorization ──
-        if not specific_dates and date_details.get("dates_found"):
-            lines.append("")
-            lines.append("  📅 முக்கிய நாட்கள்:")
-            for date_val in date_details["dates_found"][:5]:
-                lines.append(f"    • {date_val}")
-
-        return "\n".join(lines)
 
     def _format_tamil_announcement(self, notification: Dict[str, Any]) -> str:
         """
-        Format notification as Tamil announcement with date details.
-        Uses AI-translated Tamil title/summary when available.
+        Format notification as a clean Tamil announcement.
+        Simple, clear, with only dates and official links.
+        NO AI credit. NO unnecessary text.
         """
         source = notification.get("source", "அறிவிப்பு")
         title = notification.get("title", "")
@@ -130,56 +64,63 @@ class TelegramBroadcaster:
         date_details = notification.get("date_details", {})
 
         source_tamil = SOURCE_TAMIL.get(source, source)
-        ai_processed = date_details.get("ai_processed", False)
 
-        # Use AI Tamil title if available, otherwise use original
-        if ai_processed and date_details.get("title_tamil"):
+        # Use AI Tamil title if available
+        if date_details.get("ai_processed") and date_details.get("title_tamil"):
             display_title = date_details["title_tamil"]
         else:
-            display_title = title
+            display_title = title[:200]
 
-        # Build the announcement
-        announcement = f"📢 {source_tamil} அறிவிப்பு\n"
-        announcement += "━━━━━━━━━━━━━━━━━━━━\n\n"
-        announcement += f"📌 {display_title}\n"
+        # Post name
+        post_name = date_details.get("post_name", "")
 
-        # Add date details section
-        date_section = self._format_date_details_tamil(date_details)
-        if date_section:
-            announcement += f"\n{date_section}\n"
+        # Build announcement
+        msg = f"📢 {source_tamil} அறிவிப்பு\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        announcement += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        # Title
+        msg += f"📌 {display_title}\n"
 
-        if url:
-            announcement += f'\n🔗 <a href="{url}">அதிகாரப்பூர்வ அறிவிப்பு பார்க்க</a>\n'
+        # Post name if available
+        if post_name:
+            msg += f"🏷️ பதவி: {post_name}\n"
 
-        announcement += "\nமேலும் விவரங்களுக்கு அதிகாரப்பூர்வ இணையதளத்தை பார்வையிடவும்.\n\n"
-        announcement += '<a href="https://employmenttamil.in/shop/">🛒 விற்பனை நிலையம்</a>'
+        # Date details section
+        specific_dates = date_details.get("specific_dates", {})
+        if specific_dates:
+            msg += "\n📅 முக்கிய நாட்கள்:\n\n"
+            for key, date_val in specific_dates.items():
+                if date_val and str(date_val).lower() not in ("null", "none", ""):
+                    label = DATE_TYPE_TAMIL.get(key, key)
+                    msg += f"  ▪️ {label}: {date_val}\n"
 
-        # AI credit tag (small, at bottom)
-        if ai_processed:
-            provider = date_details.get("ai_provider", "")
-            if provider:
-                announcement += f"\n\n<i>🤖 AI ({provider}) மூலம் பகுப்பாய்வு</i>"
+        # Extension/Postponement alert
+        if date_details.get("is_extension"):
+            msg += "\n⚡ நாள் நீட்டிக்கப்பட்டுள்ளது!\n"
+        if date_details.get("is_postponed"):
+            msg += "\n⚡ தேர்வு ஒத்திவைக்கப்பட்டுள்ளது!\n"
 
-        return announcement
+        msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
+
+        # Official link (only government URLs)
+        if url and (".gov.in" in url or ".nic.in" in url):
+            msg += f'\n🔗 <a href="{url}">அதிகாரப்பூர்வ அறிவிப்பு</a>\n'
+
+        # Shop link — always included
+        msg += '\n🛒 <a href="https://employmenttamil.in/shop/">விற்பனை நிலையம்</a>'
+
+        return msg
 
     async def broadcast_notification(self, notification: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Broadcast a single notification to all channels with rate limiting.
-
-        RATE LIMITING:
-        - 0.5 second delay between each channel message
-        - On RetryAfter error, waits the specified time + 1s safety, then retries
+        Broadcast a single notification to all channels.
+        0.5 second delay between each message.
         """
         bot = Bot(token=self.bot_token)
         message = self._format_tamil_announcement(notification)
         results = {"success": [], "failed": []}
 
-        logger.info(
-            f"Broadcasting to {len(self.channel_ids)} channels "
-            f"with {BROADCAST_DELAY}s delay between each..."
-        )
+        logger.info(f"Broadcasting to {len(self.channel_ids)} channels...")
 
         for i, channel_id in enumerate(self.channel_ids):
             try:
@@ -192,16 +133,12 @@ class TelegramBroadcaster:
                 results["success"].append(channel_id)
                 logger.debug(f"[{i+1}/{len(self.channel_ids)}] Sent to {channel_id}")
 
-                # ── RATE LIMITING: 0.5s delay between each message ──
+                # 0.5s delay between each message
                 await asyncio.sleep(BROADCAST_DELAY)
 
             except RetryAfter as e:
-                # Telegram explicitly says to wait — respect it
                 wait_time = e.retry_after
-                logger.warning(
-                    f"Rate limited for {channel_id}. "
-                    f"Telegram says wait {wait_time}s. Waiting..."
-                )
+                logger.warning(f"Rate limited for {channel_id}. Waiting {wait_time}s...")
                 await asyncio.sleep(wait_time + 1)
 
                 # Retry once
@@ -213,28 +150,16 @@ class TelegramBroadcaster:
                         disable_web_page_preview=True,
                     )
                     results["success"].append(channel_id)
-                    logger.info(f"Sent to {channel_id} (after retry)")
                 except Exception as retry_err:
                     results["failed"].append({
                         "channel": channel_id,
-                        "error": f"Retry failed: {str(retry_err)}"
+                        "error": str(retry_err)
                     })
-                    logger.error(f"Failed after retry for {channel_id}: {retry_err}")
 
             except TelegramError as e:
                 error_msg = str(e)
                 results["failed"].append({"channel": channel_id, "error": error_msg})
-
-                if "chat not found" in error_msg.lower():
-                    logger.warning(f"Channel {channel_id} not found — bot may not be admin")
-                elif "bot was blocked" in error_msg.lower():
-                    logger.warning(f"Bot blocked in {channel_id}")
-                elif "not enough rights" in error_msg.lower():
-                    logger.warning(f"Bot lacks post permission in {channel_id}")
-                else:
-                    logger.error(f"Telegram error for {channel_id}: {e}")
-
-                # Still delay even on error
+                logger.warning(f"Failed for {channel_id}: {error_msg}")
                 await asyncio.sleep(BROADCAST_DELAY)
 
             except Exception as e:
@@ -244,10 +169,7 @@ class TelegramBroadcaster:
 
         success_count = len(results["success"])
         fail_count = len(results["failed"])
-        logger.info(
-            f"Broadcast complete: {success_count} success, {fail_count} failed "
-            f"(~{len(self.channel_ids) * BROADCAST_DELAY:.1f}s total)"
-        )
+        logger.info(f"Broadcast done: {success_count} success, {fail_count} failed")
         return results
 
     async def broadcast_notifications(
@@ -258,46 +180,36 @@ class TelegramBroadcaster:
             logger.info("No notifications to broadcast")
             return {"total": 0, "results": []}
 
-        logger.info(
-            f"Broadcasting {len(notifications)} notifications "
-            f"to {len(self.channel_ids)} channels..."
-        )
+        logger.info(f"Broadcasting {len(notifications)} notifications...")
         all_results = []
 
         for idx, notification in enumerate(notifications):
             logger.info(
-                f"Notification {idx+1}/{len(notifications)}: "
+                f"[{idx+1}/{len(notifications)}] "
                 f"{notification.get('source', '')} - "
-                f"{notification.get('title', '')[:50]}..."
+                f"{notification.get('title', '')[:50]}"
             )
             result = await self.broadcast_notification(notification)
             all_results.append({
                 "notification": notification.get("title", "")[:100],
                 "source": notification.get("source", ""),
-                "date_type": notification.get("date_details", {}).get("date_type", "unknown"),
-                "ai_processed": notification.get("date_details", {}).get("ai_processed", False),
                 "result": result,
             })
 
-            # Extra 1s delay between different notifications
+            # 1s delay between different notifications
             if idx < len(notifications) - 1:
                 await asyncio.sleep(1.0)
 
         total_success = sum(len(r["result"]["success"]) for r in all_results)
         total_failed = sum(len(r["result"]["failed"]) for r in all_results)
-        logger.info(
-            f"All broadcasts done: {total_success} sent, "
-            f"{total_failed} failed across {len(notifications)} notifications"
-        )
+        logger.info(f"All done: {total_success} sent, {total_failed} failed")
 
         return {"total": len(notifications), "results": all_results}
 
     def broadcast_notifications_sync(
         self, notifications: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """
-        Synchronous wrapper for APScheduler background thread.
-        """
+        """Synchronous wrapper for APScheduler background thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
