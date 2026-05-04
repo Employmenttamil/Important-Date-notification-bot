@@ -2,8 +2,10 @@
 AI Processor module for intelligent date extraction and Tamil translation.
 Uses Groq (primary, free tier) with Gemini as fallback.
 
+STRICT RULE: Only returns data when a REAL DATE is found in the notification.
+If no actual date (DD.MM.YYYY or similar) exists, returns None — meaning NO broadcast.
+
 All API keys are loaded from environment variables — NEVER hardcoded.
-Set them in Render dashboard or .env file locally.
 """
 
 import os
@@ -23,44 +25,43 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 # Gemini model (free tier)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
-# System prompt for extracting dates and translating to Tamil
-SYSTEM_PROMPT = """You are an expert Tamil government exam notification analyzer.
+# System prompt — strict date-only extraction
+SYSTEM_PROMPT = """You are a Tamil government exam date extractor. You ONLY extract REAL DATES from notifications.
 
-Your job is to analyze government exam notifications from TNPSC, SSC, and RRB and extract ALL important dates and details.
+STRICT RULES:
+1. ONLY return data if the notification contains at least ONE real date (like 15.06.2026, June 15 2026, etc.)
+2. If there is NO real date in the notification, you MUST return: {"has_important_date": false}
+3. Do NOT make up dates. Do NOT guess dates. Only extract dates that are explicitly written.
+4. Ignore general website descriptions, disclaimers, copyright notices, navigation links.
+5. Only focus on: exam dates, hall ticket dates, application start/end dates, date extensions, postponements, result dates.
 
-For each notification, extract and return a JSON object with these fields:
+If a REAL DATE exists, return this JSON:
 {
-  "title_tamil": "Notification title translated to simple Tamil",
-  "summary_tamil": "Brief 1-2 line summary in Tamil",
+  "has_important_date": true,
+  "title_tamil": "Short title in Tamil (exam name + what the date is about)",
   "dates": {
-    "exam_date": "date or null",
-    "hall_ticket_date": "date or null",
-    "application_start_date": "date or null",
-    "application_end_date": "date or null",
-    "date_extension": "date or null",
-    "postponed_to": "date or null",
-    "result_date": "date or null",
-    "notification_date": "date or null"
+    "exam_date": "DD.MM.YYYY or null",
+    "hall_ticket_date": "DD.MM.YYYY or null",
+    "application_start_date": "DD.MM.YYYY or null",
+    "application_end_date": "DD.MM.YYYY or null",
+    "date_extension": "DD.MM.YYYY or null",
+    "postponed_to": "DD.MM.YYYY or null",
+    "result_date": "DD.MM.YYYY or null"
   },
-  "date_type": "one of: exam_date, hall_ticket, application_start, application_end, date_extension, postponed, result_date, notification_date",
+  "date_type": "exam_date|hall_ticket|application_start|application_end|date_extension|postponed|result_date",
   "is_extension": true/false,
   "is_postponed": true/false,
-  "post_name": "Name of the post/exam in Tamil",
-  "important_note_tamil": "Any important note in Tamil or null"
+  "post_name": "Name of post/exam in Tamil"
 }
 
-Rules:
-- Translate everything to simple, clear Tamil
-- Keep dates in DD.MM.YYYY format
-- If a date is not mentioned, set it to null
-- Detect if this is a date extension or postponement
-- Be accurate — do not guess dates that are not in the text
-- Return ONLY valid JSON, no extra text"""
+If NO real date exists, return ONLY:
+{"has_important_date": false}
+
+Return ONLY valid JSON. No extra text."""
 
 
 def _try_parse_json(text: str) -> Optional[Dict]:
     """Try to parse JSON from AI response, handling markdown code blocks."""
-    # Remove markdown code block if present
     text = text.strip()
     if text.startswith("```json"):
         text = text[7:]
@@ -73,7 +74,6 @@ def _try_parse_json(text: str) -> Optional[Dict]:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Try to find JSON object in the text
         start = text.find("{")
         end = text.rfind("}") + 1
         if start >= 0 and end > start:
@@ -87,16 +87,9 @@ def _try_parse_json(text: str) -> Optional[Dict]:
 def process_with_groq(notification_text: str, source: str) -> Optional[Dict[str, Any]]:
     """
     Process notification using Groq API (Llama 3.1, free tier).
-
-    Args:
-        notification_text: Raw notification text
-        source: Source website (TNPSC, SSC, RRB)
-
-    Returns:
-        Processed notification dict or None on failure
+    Returns None if no important date found or on failure.
     """
     if not GROQ_API_KEY:
-        logger.warning("GROQ_API_KEY not set, skipping Groq processing")
         return None
 
     try:
@@ -107,7 +100,7 @@ def process_with_groq(notification_text: str, source: str) -> Optional[Dict[str,
         user_message = (
             f"Source: {source}\n"
             f"Notification text:\n{notification_text}\n\n"
-            f"Extract all dates and translate to Tamil. Return JSON only."
+            f"Does this contain a REAL DATE? If yes, extract it. If no, return has_important_date: false."
         )
 
         response = client.chat.completions.create(
@@ -116,18 +109,22 @@ def process_with_groq(notification_text: str, source: str) -> Optional[Dict[str,
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            max_tokens=1000,
-            temperature=0.1,
+            max_tokens=800,
+            temperature=0.0,
         )
 
         result_text = response.choices[0].message.content
         parsed = _try_parse_json(result_text)
 
         if parsed:
-            logger.info(f"Groq processed successfully: {source}")
+            # STRICT CHECK: Only return if has_important_date is True
+            if not parsed.get("has_important_date", False):
+                logger.info(f"Groq: No important date found in {source} notification. SKIPPING.")
+                return None
+            logger.info(f"Groq: Important date found in {source} notification.")
             return parsed
         else:
-            logger.warning(f"Groq returned non-JSON response: {result_text[:200]}")
+            logger.warning(f"Groq returned non-JSON: {result_text[:200]}")
             return None
 
     except ImportError:
@@ -141,16 +138,9 @@ def process_with_groq(notification_text: str, source: str) -> Optional[Dict[str,
 def process_with_gemini(notification_text: str, source: str) -> Optional[Dict[str, Any]]:
     """
     Process notification using Gemini API (free tier fallback).
-
-    Args:
-        notification_text: Raw notification text
-        source: Source website (TNPSC, SSC, RRB)
-
-    Returns:
-        Processed notification dict or None on failure
+    Returns None if no important date found or on failure.
     """
     if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set, skipping Gemini processing")
         return None
 
     try:
@@ -163,7 +153,7 @@ def process_with_gemini(notification_text: str, source: str) -> Optional[Dict[st
             f"{SYSTEM_PROMPT}\n\n"
             f"Source: {source}\n"
             f"Notification text:\n{notification_text}\n\n"
-            f"Extract all dates and translate to Tamil. Return JSON only."
+            f"Does this contain a REAL DATE? If yes, extract it. If no, return has_important_date: false."
         )
 
         response = model.generate_content(prompt)
@@ -171,10 +161,13 @@ def process_with_gemini(notification_text: str, source: str) -> Optional[Dict[st
         parsed = _try_parse_json(result_text)
 
         if parsed:
-            logger.info(f"Gemini processed successfully: {source}")
+            if not parsed.get("has_important_date", False):
+                logger.info(f"Gemini: No important date found in {source} notification. SKIPPING.")
+                return None
+            logger.info(f"Gemini: Important date found in {source} notification.")
             return parsed
         else:
-            logger.warning(f"Gemini returned non-JSON response: {result_text[:200]}")
+            logger.warning(f"Gemini returned non-JSON: {result_text[:200]}")
             return None
 
     except ImportError:
@@ -188,14 +181,11 @@ def process_with_gemini(notification_text: str, source: str) -> Optional[Dict[st
 def process_notification(notification_text: str, source: str) -> Optional[Dict[str, Any]]:
     """
     Process notification with AI — tries Groq first, falls back to Gemini.
-    If both fail, returns None (the bot will use basic regex extraction).
+    Returns None if:
+    - No real date found in the notification
+    - Both AI providers fail
 
-    Args:
-        notification_text: Raw notification text
-        source: Source website (TNPSC, SSC, RRB)
-
-    Returns:
-        AI-processed notification dict or None
+    This ensures ONLY date-containing notifications get broadcast.
     """
     # Try Groq first (primary — free tier, fast)
     result = process_with_groq(notification_text, source)
@@ -209,21 +199,13 @@ def process_notification(notification_text: str, source: str) -> Optional[Dict[s
         result["_ai_provider"] = "gemini"
         return result
 
-    # Both failed
-    logger.warning(
-        f"Both AI providers failed for {source} notification. "
-        f"Falling back to basic extraction."
-    )
+    # Both failed — return None (notification will be checked by regex)
+    logger.warning(f"Both AI providers failed for {source}. Will use regex fallback.")
     return None
 
 
 def is_ai_available() -> Dict[str, bool]:
-    """
-    Check which AI providers are configured.
-
-    Returns:
-        Dict with availability status for each provider
-    """
+    """Check which AI providers are configured."""
     return {
         "groq": bool(GROQ_API_KEY),
         "gemini": bool(GEMINI_API_KEY),
