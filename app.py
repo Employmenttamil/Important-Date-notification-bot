@@ -161,7 +161,7 @@ def webhook():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
-@app.route("/trigger-scrape", methods=["POST"])
+@app.route("/trigger-scrape", methods=["GET", "POST"])
 def trigger_scrape():
     """Manually trigger scraping (for testing)."""
     try:
@@ -191,7 +191,7 @@ def index():
             "health": "/health",
             "status": "/status",
             "webhook": config.WEBHOOK_PATH,
-            "trigger_scrape": "/trigger-scrape (POST)",
+            "trigger_scrape": "/trigger-scrape (GET or POST)",
         },
     }), 200
 
